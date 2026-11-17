@@ -473,6 +473,7 @@ var zh = map[string]string{
 	"memories":           "记忆整理模型",
 	"large":              "大模型",
 	"gateway":            "网关",
+	"hidden":             "已隐藏",
 	"auth":               "认证",
 	"applies to":         "适用范围",
 	"advisor review":     "顾问审查",

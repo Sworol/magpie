@@ -745,9 +745,11 @@ var listError = provider.Provider.ListError
 var signedOut = provider.Provider.SignedOut
 
 func (m model) viewProviders() string {
+	return m.header() + "\n\n" + m.viewProvidersBody()
+}
+
+func (m model) viewProvidersBody() string {
 	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n\n")
 	if m.provsErr != nil {
 		b.WriteString(pad + "  " + sBad.Render("! "+m.provsErr.Error()) + "\n\n")
 	}
@@ -1278,10 +1280,12 @@ func credits(t usage.Totals) string {
 var bars = []rune(" ▁▂▃▄▅▆▇█")
 
 func (m model) viewUsage() string {
+	return m.header() + "\n\n" + m.viewUsageBody()
+}
+
+func (m model) viewUsageBody() string {
 	s := m.sum
 	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n\n")
 	var tabs []string
 	for _, p := range periods {
 		if p == s.Period {
@@ -1584,8 +1588,12 @@ func (m model) updateAsk(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) viewAsk() string {
+	return m.viewAskBody()
+}
+
+func (m model) viewAskBody() string {
 	var b strings.Builder
-	b.WriteString(m.header(m.ask.crumbs...))
+	b.WriteString(m.crumbHeader(m.ask.crumbs...))
 	b.WriteString("\n\n")
 	b.WriteString(pad + sCursor.Render("❯ ") + m.ask.input.View())
 	if m.ask.hint != "" {

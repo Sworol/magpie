@@ -611,9 +611,11 @@ func nextMemberEffort(effort string) string {
 type renamedMsg struct{ from, to string }
 
 func (m model) viewGroups() string {
+	return m.header() + "\n\n" + m.viewGroupsBody()
+}
+
+func (m model) viewGroupsBody() string {
 	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n\n")
 	if len(m.groups) == 0 {
 		b.WriteString(pad + "  " + sMuted.Render(tr("no routing groups yet · n makes one")))
 		return b.String()
@@ -675,9 +677,13 @@ func (m model) viewGroups() string {
 }
 
 func (m model) viewGroup() string {
+	return m.viewGroupBody()
+}
+
+func (m model) viewGroupBody() string {
 	g, _ := m.group()
 	var b strings.Builder
-	b.WriteString(m.header(tr("routing"), g.Name))
+	b.WriteString(m.crumbHeader(tr("routing"), g.Name))
 	b.WriteString("\n\n")
 	head := []string{g.Ref(), groupRouting(g), staysName(g.Affinity)}
 	if g.Context > 0 {

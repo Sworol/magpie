@@ -193,9 +193,11 @@ func (m *model) openSessPick(folder bool) {
 }
 
 func (m model) viewSessions() string {
+	return m.header() + "\n\n" + m.viewSessionsBody()
+}
+
+func (m model) viewSessionsBody() string {
 	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n\n")
 	if m.sstat {
 		b.WriteString(strings.Join(sessLines(m.sstats, m.srange, m.smodel, m.sfolder, m.scost, m.w-len(pad)-2, m.h), "\n"))
 	} else {

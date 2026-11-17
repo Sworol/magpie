@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,34 +28,6 @@ import (
 	"github.com/yetone/magpie/internal/uilang"
 	"github.com/yetone/magpie/internal/usage"
 )
-
-// ---- styling ---------------------------------------------------------------
-
-var (
-	cAccent = lipgloss.AdaptiveColor{Light: "#4F46E5", Dark: "#A5B4FC"}
-	cText   = lipgloss.AdaptiveColor{Light: "#1F2328", Dark: "#E6E6E6"}
-	cMuted  = lipgloss.AdaptiveColor{Light: "#8B8F98", Dark: "#7C8290"}
-	cFaint  = lipgloss.AdaptiveColor{Light: "#C4C7CE", Dark: "#4A4F5A"}
-	cOK     = lipgloss.AdaptiveColor{Light: "#0F9D58", Dark: "#7EE2A8"}
-	cBad    = lipgloss.AdaptiveColor{Light: "#D93025", Dark: "#FF8A80"}
-	cPill   = lipgloss.AdaptiveColor{Light: "#EEF0FF", Dark: "#2C2E4A"}
-
-	sTitle  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	sCrumb  = lipgloss.NewStyle().Foreground(cMuted)
-	sText   = lipgloss.NewStyle().Foreground(cText)
-	sMuted  = lipgloss.NewStyle().Foreground(cMuted)
-	sFaint  = lipgloss.NewStyle().Foreground(cFaint)
-	sName   = lipgloss.NewStyle().Bold(true).Foreground(cText)
-	sNameOn = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	sPill   = lipgloss.NewStyle().Foreground(cAccent).Background(cPill).Padding(0, 1)
-	sValue  = lipgloss.NewStyle().Foreground(cText).Padding(0, 1)
-	sOK     = lipgloss.NewStyle().Foreground(cOK)
-	sBad    = lipgloss.NewStyle().Foreground(cBad)
-	sKey    = lipgloss.NewStyle().Foreground(cText)
-	sCursor = lipgloss.NewStyle().Foreground(cAccent).Bold(true)
-)
-
-const pad = "  "
 
 // ---- model -----------------------------------------------------------------
 
@@ -108,6 +81,11 @@ type model struct {
 	// failover: what an agent going through magpie for account failover
 	// alone, not connected, says of it (agent.FailoverSaid, #1385)
 	failover []string
+
+	// alist is the Agents page's list view; row remains the selection truth.
+	// alistReady says it was made: the zero list.Model panics on use.
+	alist      list.Model
+	alistReady bool
 
 	page      page
 	back      mode // where esc goes from a picker or a line to type
@@ -194,6 +172,7 @@ func newModel() model {
 	s := settings.Load()
 	shown, hidden := settings.Arrange(s, set, func(a *agent.Agent) string { return a.ID })
 	m := model{agents: append(shown, hidden...), hidden: len(shown), period: usage.Week, srange: 1, qleft: s.QuotaLeft}
+	m.initAgentList()
 	// no model catalog yet: Init syncs it. Set here, as Init's receiver is
 	// a copy the program never sees.
 	m.syncing = catalog.Source() == ""
@@ -208,6 +187,7 @@ func (m *model) reload() {
 		m.values[i] = a.Values()
 		m.failover[i] = a.FailoverSaid()
 	}
+	m.syncAgentList()
 	switch m.page {
 	case pageProviders:
 		m.reloadProviders()
@@ -297,6 +277,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+		m.syncAgentList()
 		return m, nil
 	case flashMsg:
 		m.flash, m.flashOK = msg.text, msg.ok
@@ -365,6 +346,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flash, m.flashOK = tr("model catalog synced from models.dev"), true
 		}
 		return m, nil
+	case list.FilterMatchesMsg:
+		// the agents list narrows itself from this, sent by a command of its
+		// own: a message the model doesn't hand on is a filter that never
+		// takes effect
+		if m.mode != modeList || m.page != pageAgents {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.alist, cmd = m.alist.Update(msg)
+		m.row = m.currentAgentIndex()
+		return m, cmd
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -441,23 +433,48 @@ func (m model) pageKey(k string) (page, bool) {
 }
 
 func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// while filtering the list, let bubbles/list own key handling
+	if m.alist.FilterState() == list.Filtering {
+		var cmd tea.Cmd
+		m.alist, cmd = m.alist.Update(msg)
+		m.row = m.currentAgentIndex()
+		m.col = 0
+		return m, cmd
+	}
+
 	m.flash = ""
 	switch msg.String() {
 	case "q", "esc":
 		return m, tea.Quit
 	case "j", "down":
-		m.row = (m.row + 1) % len(m.agents)
+		if len(m.agents) == 0 {
+			return m, nil
+		}
+		m.alist.CursorDown()
+		m.row = m.currentAgentIndex()
 		m.col = 0
 	case "k", "up":
-		m.row = (m.row + len(m.agents) - 1) % len(m.agents)
+		if len(m.agents) == 0 {
+			return m, nil
+		}
+		m.alist.CursorUp()
+		m.row = m.currentAgentIndex()
 		m.col = 0
 	case "l", "right", "tab":
-		m.col = (m.col + 1) % len(m.agents[m.row].Fields)
+		if m.row >= 0 && m.row < len(m.agents) && len(m.agents[m.row].Fields) > 0 {
+			m.col = (m.col + 1) % len(m.agents[m.row].Fields)
+		}
 	case "h", "left", "shift+tab":
-		n := len(m.agents[m.row].Fields)
-		m.col = (m.col + n - 1) % n
+		if m.row >= 0 && m.row < len(m.agents) {
+			n := len(m.agents[m.row].Fields)
+			if n > 0 {
+				m.col = (m.col + n - 1) % n
+			}
+		}
 	case "enter", " ":
-		m.openFieldPicker()
+		if m.row >= 0 && m.row < len(m.agents) {
+			m.openFieldPicker()
+		}
 	case "r":
 		m.reload()
 		m.flash, m.flashOK = tr("reloaded"), true
@@ -471,6 +488,21 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.name = newInput(tr("profile name"))
 	case "p":
 		m.openProfiles()
+	case "/":
+		// start bubbles/list filter
+		var cmd tea.Cmd
+		m.alist, cmd = m.alist.Update(msg)
+		return m, cmd
+	default:
+		// allow bubbles/list to handle other keys (pgup/pgdown, home/end, etc.)
+		// but avoid eating '1'-'6' page navigation handled in Update
+		if msg.Type == tea.KeyPgUp || msg.Type == tea.KeyPgDown || msg.Type == tea.KeyHome || msg.Type == tea.KeyEnd {
+			var cmd tea.Cmd
+			m.alist, cmd = m.alist.Update(msg)
+			m.row = m.currentAgentIndex()
+			m.col = 0
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -781,80 +813,7 @@ func plural(n int) string {
 // ---- view ------------------------------------------------------------------
 
 func (m model) View() string {
-	var body string
-	var footer string
-	switch m.mode {
-	case modeList:
-		switch m.page {
-		case pageProviders:
-			body = m.viewProviders()
-			footer = hints("↑↓", "provider", "↵", "models", "e", "key", "w", "address", "a", "add", "f", "family", "u", "list/groups only", "o", "on/off", "m", "fetch models", "t", "test", "b", "balances", "d", "remove", "1–6", "pages")
-		case pageGroups:
-			body = m.viewGroups()
-			footer = hints("↑↓", "group", "↵", "open", "n", "new", "o", "routing", "d", "remove", "u", "bring back", "1–6", "pages", "q", "quit")
-		case pageLibrary:
-			body = m.viewLibrary()
-			footer = hints("↑↓", "item", "↵", "agents", "a", "add", "e", "edit", "u", "update skill", "i", "bring in", "d", "remove", "s", "sync", "r", "reload", "1–6", "pages", "q", "quit")
-		case pageSessions:
-			body = m.viewSessions()
-			if m.sstat {
-				footer = hints("←→", "range", "M", "model", "f", "folder", "x", "clear", "c", "tokens / cost", "s", "sessions", "r", "reload", "1–6", "pages", "q", "quit")
-			} else {
-				footer = hints("↑↓", "session", "↵", "resume", "←→", "range", "M", "model", "f", "folder", "x", "clear", "s", "stats", "r", "reload", "1–6", "pages", "q", "quit")
-			}
-		case pageUsage:
-			body = m.viewUsage()
-			footer = hints("←→", "period", "t w m A", "today · 7 days · 30 days · all", "u", "used / left", "c", "daily check-in", "r", "reload", "1–6", "pages", "q", "quit")
-		default:
-			body = m.viewList()
-			footer = hints("↑↓", "agent", "←→", "field", "↵", "change", "s", "save profile", "p", "profiles", "1–6", "pages", "q", "quit")
-		}
-	case modePick, modeProfiles:
-		body = m.viewPicker()
-		switch {
-		case m.mode == modeProfiles:
-			footer = hints("↑↓", "move", "↵", "apply", "ctrl+e", "rename", "ctrl+d", "delete", "esc", "back")
-		case m.pk.refetch != nil:
-			footer = hints("↑↓", "move", "↵", "on / off", "ctrl+r", "fetch models again", "esc", "back")
-		case m.pk.toggle != nil:
-			footer = hints("↑↓", "move", "↵", "on / off", "esc", "back")
-		default:
-			footer = hints("↑↓", "move", "↵", "select", "esc", "back")
-		}
-	case modeAsk:
-		body = m.viewAsk()
-		footer = hints("↵", "save", "esc", "cancel")
-	case modeGroup:
-		body = m.viewGroup()
-		// two lines: there is more to do to a group than one holds
-		footer = hints("↑↓", "model / rule", "J K", "move", "a", "add model", "n", "new rule", "↵", "edit rule", "d", "take out", "esc", "back") + "\n" +
-			pad + hints("E", "effort", "F", "fast", "c", "classifier", "o", "routing", "s", "stays", "x", "context", "l", "levels", "f", "family", "N", "note", "R", "rename")
-	case modeName:
-		body = m.viewName()
-		footer = hints("↵", "save", "esc", "cancel")
-		if m.rename != "" {
-			footer = hints("↵", "rename", "esc", "cancel")
-		}
-	}
-
-	status := ""
-	switch {
-	case m.flash != "" && m.flashOK:
-		status = sOK.Render("✓ ") + sText.Render(m.flash)
-	case m.flash != "":
-		status = sBad.Render("✗ ") + sText.Render(m.flash)
-	case m.syncing:
-		status = sMuted.Render("… " + tr("syncing model catalog"))
-	default:
-		status = gatewayStatus()
-	}
-
-	lines := strings.Count(body, "\n") + 1
-	fill := m.h - lines - 3 - strings.Count(footer, "\n")
-	if fill < 1 {
-		fill = 1
-	}
-	return body + strings.Repeat("\n", fill) + pad + status + "\n" + pad + footer + "\n"
+	return m.renderShell(m.bodyForMode(), m.footerForMode())
 }
 
 func (m model) header(crumbs ...string) string {
@@ -865,9 +824,9 @@ func (m model) header(crumbs ...string) string {
 		for i, n := range pageNames {
 			label := fmt.Sprintf("%d %s", i+1, tr(n))
 			if page(i) == m.page {
-				s += sPill.Render(label) + " "
+				s += sTabOn.Render(label) + " "
 			} else {
-				s += sMuted.Render(" "+label+" ") + " "
+				s += sTabOff.Render(" "+label+" ") + " "
 			}
 		}
 		return strings.TrimRight(s, " ")
@@ -878,74 +837,14 @@ func (m model) header(crumbs ...string) string {
 	return s
 }
 
-func (m model) viewList() string {
-	nameW := 0
-	for _, a := range m.agents {
-		nameW = max(nameW, lipgloss.Width(a.Name))
-	}
-	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n\n")
-	// the rows around the one picked, as many as fit — a machine with more
-	// agents than the terminal has rows would otherwise scroll the highlight
-	// off and freeze the page, as the library page did (#2220)
-	visible := max(3, m.h-7)
-	start := 0
-	if m.row >= visible {
-		start = m.row - visible + 1
-	}
-	end := min(len(m.agents), start+visible)
-	for i := start; i < end; i++ {
-		a := m.agents[i]
-		sel := i == m.row
-		marker := "  "
-		name := sName.Render(padRight(a.Name, nameW))
-		if i >= m.hidden {
-			name = sFaint.Render(padRight(a.Name, nameW))
-		}
-		if sel {
-			marker = sCursor.Render("▸ ")
-			name = sNameOn.Render(padRight(a.Name, nameW))
-		}
-		line := pad + marker + name + "  "
-		for j, f := range a.Fields {
-			v := m.values[i][f.Key]
-			if v == "" && f.Quiet && !(sel && j == m.col) {
-				continue
-			}
-			var cell string
-			switch {
-			case sel && j == m.col:
-				cell = sPill.Render(dash(v))
-			case v == "":
-				cell = sFaint.Render(" — ")
-			default:
-				cell = sValue.Render(v)
-			}
-			if j > 0 || f.Label != "model" {
-				line += sMuted.Render(" " + tr(f.Label))
-			}
-			line += cell + " "
-		}
-		if i < len(m.failover) && m.failover[i] != "" {
-			line += sMuted.Render(" · " + m.failover[i])
-		}
-		if sel {
-			p := tilde(a.Path)
-			if room := m.w - lipgloss.Width(line) - lipgloss.Width(p) - 2; room > 0 {
-				line += strings.Repeat(" ", room) + sFaint.Render(p)
-			}
-		}
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
+func (m model) viewPicker() string {
+	return m.viewPickerBody()
 }
 
-func (m model) viewPicker() string {
+func (m model) viewPickerBody() string {
 	p := m.pk
 	var b strings.Builder
-	b.WriteString(m.header(p.crumbs...))
+	b.WriteString(m.crumbHeader(p.crumbs...))
 	b.WriteString("\n\n")
 	b.WriteString(pad + sCursor.Render("❯ ") + p.input.View())
 	b.WriteString("\n\n")
@@ -995,13 +894,17 @@ func (m model) viewPicker() string {
 }
 
 func (m model) viewName() string {
+	return m.viewNameBody()
+}
+
+func (m model) viewNameBody() string {
 	var b strings.Builder
 	if m.rename != "" {
-		b.WriteString(m.header(tr("rename profile")) + "\n\n" + pad + sCursor.Render("❯ ") + m.name.View() + "\n\n")
+		b.WriteString(m.crumbHeader(tr("rename profile")) + "\n\n" + pad + sCursor.Render("❯ ") + m.name.View() + "\n\n")
 		b.WriteString(pad + "  " + sMuted.Render(trf("renames %s · the settings it holds stay as they are", m.rename)))
 		return b.String()
 	}
-	b.WriteString(m.header(tr("save profile")))
+	b.WriteString(m.crumbHeader(tr("save profile")))
 	b.WriteString("\n\n")
 	b.WriteString(pad + sCursor.Render("❯ ") + m.name.View())
 	b.WriteString("\n\n")

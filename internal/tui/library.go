@@ -567,9 +567,11 @@ func saveInstructions(text string) tea.Cmd {
 }
 
 func (m model) viewLibrary() string {
+	return m.header() + "\n\n" + m.viewLibraryBody()
+}
+
+func (m model) viewLibraryBody() string {
 	var b strings.Builder
-	b.WriteString(m.header())
-	b.WriteString("\n\n")
 	if m.libErr != "" {
 		b.WriteString(pad + "  " + sBad.Render(m.libErr))
 		return b.String()
